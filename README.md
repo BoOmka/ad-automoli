@@ -139,7 +139,8 @@ key | optional | type | default | description
 `disable_switch_entities` | True | list/string | | One or more Home Assistant Entities as switch for AutoMoLi. If the state of **any** entity is *off*, AutoMoLi is *deactivated*. (Use an *input_boolean* for example)
 `only_own_events` | True | bool | | Track if automoli switched this light on. If not, an existing timer will be deleted and the state will not change
 `disable_switch_states` | True | list/string | ["off"] | Custom states for `disable_switch_entities`. If the state of **any** entity is *in this list*, AutoMoLi is *deactivated*. Can be used to disable with `media_players` in `playing` state for example.
-`disable_hue_groups` | False | boolean | | Disable the use of Hue Groups/Scenes
+`disable_hue_groups` | True | boolean | False | Disable the use of Hue Groups/Scenes
+`disable_sensor_auto_lookup` | True | boolean | False | Use only explicitly configured sensors 
 `delay` | True | integer | 150 | Seconds without motion until lights will switched off. Can be disabled (lights stay always on) with `0`
 ~~`motion_event`~~ | ~~True~~ | ~~string~~ | | **replaced by `motion_state_on/off`**
 `daytimes` | True | list | *see code* | Different daytimes with light settings (see below)
@@ -152,6 +153,8 @@ key | optional | type | default | description
 `humidity_threshold` | True | integer |  | If humidity is *above* this value, lights will *not switched off*
 `motion_state_on` | True | integer | | If using motion sensors which don't send events if already activated, like Xiaomi do, add this to your config with "on". This will listen to state changes instead
 `motion_state_off` | True | integer | | If using motion sensors which don't send events if already activated, like Xiaomi do, add this to your config with "off". This will listen to the state changes instead.
+`door` | True | list/string |  | Door binary sensor entities
+`door_blocking_states` | True | list/string | ["off"] | Door binary sensor entities
 `debug_log` | True | bool | false | Activate debug logging (for this room)
 
 ### daytimes

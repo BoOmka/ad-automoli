@@ -28,7 +28,7 @@ DAYTIME_SWITCH_ICON = "⏰"
 
 # default values
 DEFAULT_NAME = "daytime"
-DEFAULT_LIGHT_SETTING = 100
+DEFAULT_LIGHT_SETTING = -1
 DEFAULT_DELAY = 150
 DEFAULT_DIM_METHOD = "step"
 DEFAULT_DAYTIMES: List[Dict[str, Union[str, int]]] = [
@@ -38,19 +38,26 @@ DEFAULT_DAYTIMES: List[Dict[str, Union[str, int]]] = [
     dict(starttime="22:30", name="night", light=0),
 ]
 DEFAULT_LOGLEVEL = "INFO"
+DEFAULT_DOOR_BLOCKING_STATE = "off"
 
 
 EVENT_MOTION_XIAOMI = "xiaomi_aqara.motion"
 
+SENSOR_TYPE_MOTION = "motion"
+SENSOR_TYPE_HUMIDITY = "humidity"
+SENSOR_TYPE_ILLUMINANCE = "illuminance"
+SENSOR_TYPE_DOOR = "door"
+
 KEYWORDS = {
-    "humidity": "sensor.humidity_",
-    "illuminance": "sensor.illumination_",
     "light": "light.",
-    "motion": "binary_sensor.motion_sensor_",
+    SENSOR_TYPE_HUMIDITY: "sensor.humidity_",
+    SENSOR_TYPE_ILLUMINANCE: "sensor.illumination_",
+    SENSOR_TYPE_MOTION: "binary_sensor.motion_sensor_",
+    SENSOR_TYPE_DOOR: "binary_sensor.door_",
 }
 
-SENSORS_REQUIRED = ["motion"]
-SENSORS_OPTIONAL = ["humidity", "illuminance"]
+SENSORS_REQUIRED = [SENSOR_TYPE_MOTION]
+SENSORS_OPTIONAL = [SENSOR_TYPE_HUMIDITY, SENSOR_TYPE_ILLUMINANCE, SENSOR_TYPE_DOOR]
 
 RANDOMIZE_SEC = 5
 SECONDS_PER_MIN: int = 60
@@ -194,8 +201,8 @@ class AutoMoLi(hass.Hass):  # type: ignore
 
         # threshold values
         self.thresholds = {
-            "humidity": self.args.pop("humidity_threshold", None),
-            "illuminance": self.args.pop("illuminance_threshold", None),
+            SENSOR_TYPE_HUMIDITY: self.args.pop("humidity_threshold", None),
+            SENSOR_TYPE_ILLUMINANCE: self.args.pop("illuminance_threshold", None),
         }
 
         # experimental dimming features
@@ -223,11 +230,17 @@ class AutoMoLi(hass.Hass):  # type: ignore
         self.disable_switch_entities: Set[str] = self.listr(self.args.pop("disable_switch_entities", set()))
         self.disable_switch_states: Set[str] = self.listr(self.args.pop("disable_switch_states", set(["off"])))
 
+        self.door_blocking_states: Set[str] = self.listr(
+            self.args.pop("door_blocking_states", {DEFAULT_DOOR_BLOCKING_STATE})
+        )
+
         # store if an entity has been switched on by automoli
         self.only_own_events: bool = bool(self.args.pop("only_own_events", False))
         self._switched_on_by_automoli: Set[str] = set()
 
         self.disable_hue_groups: bool = self.args.pop("disable_hue_groups", False)
+
+        self.disable_sensor_auto_lookup: bool = self.args.pop("disable_sensor_auto_lookup", False)
 
         # eol of the old option name
         if "disable_switch_entity" in self.args:
@@ -259,16 +272,16 @@ class AutoMoLi(hass.Hass):  # type: ignore
         self.sensors: Dict[str, Any] = {}
 
         # enumerate sensors for motion detection
-        self.sensors["motion"] = self.listr(
-            self.args.pop("motion", await self.find_sensors(KEYWORDS["motion"], self.room, states))
+        self.sensors[SENSOR_TYPE_MOTION] = self.listr(
+            self.args.pop(SENSOR_TYPE_MOTION, await self.find_sensors(KEYWORDS[SENSOR_TYPE_MOTION], self.room, states))
         )
 
         # requirements check
-        if not self.lights or not self.sensors["motion"]:
+        if not self.lights or not self.sensors[SENSOR_TYPE_MOTION]:
             self.lg("")
             self.lg(
                 f"{hl('No lights/sensors')} given and none found with name: "
-                f"'{hl(KEYWORDS['light'])}*{hl(self.room)}*' or '{hl(KEYWORDS['motion'])}*{hl(self.room)}*'",
+                f"'{hl(KEYWORDS['light'])}*{hl(self.room)}*' or '{hl(KEYWORDS[SENSOR_TYPE_MOTION])}*{hl(self.room)}*'",
                 icon="⚠️ ",
             )
             self.lg("")
@@ -279,8 +292,8 @@ class AutoMoLi(hass.Hass):  # type: ignore
         # enumerate optional sensors & disable optional features if sensors are not available
         for sensor_type in SENSORS_OPTIONAL:
 
-            if sensor_type in self.thresholds and self.thresholds[sensor_type]:
-                self.sensors[sensor_type] = self.listr(self.args.pop("motion", None)) or await self.find_sensors(
+            if sensor_type in self.thresholds and self.thresholds[sensor_type] or sensor_type == SENSOR_TYPE_DOOR:
+                self.sensors[sensor_type] = self.listr(self.args.pop(sensor_type, None)) or await self.find_sensors(
                     KEYWORDS[sensor_type], self.room, states
                 )
 
@@ -297,7 +310,7 @@ class AutoMoLi(hass.Hass):  # type: ignore
 
         # set up event listener for each sensor
         listener: Set[Coroutine[Any, Any, Any]] = set()
-        for sensor in self.sensors["motion"]:
+        for sensor in self.sensors[SENSOR_TYPE_MOTION]:
 
             # listen to xiaomi sensors by default
             if not any([self.states["motion_on"], self.states["motion_off"]]):
@@ -315,7 +328,7 @@ class AutoMoLi(hass.Hass):  # type: ignore
 
         self.args.update(
             {
-                "room": self.room.capitalize(),
+                "room": self.room.title(),
                 "delay": self.delay,
                 "active_daytime": self.active_daytime,
                 "daytimes": daytimes,
@@ -326,6 +339,8 @@ class AutoMoLi(hass.Hass):  # type: ignore
                 "disable_hue_groups": self.disable_hue_groups,
                 "only_own_events": self.only_own_events,
                 "loglevel": self.loglevel,
+                "disable_sensor_auto_lookup": self.disable_sensor_auto_lookup,
+                "door_blocking_states": self.door_blocking_states,
             }
         )
 
@@ -378,7 +393,7 @@ class AutoMoLi(hass.Hass):  # type: ignore
         # starte the timer if motion is cleared
         self.lg(f"motion_cleared(..) {entity} changed {attribute} from {old} to {new}", level=logging.DEBUG)
 
-        if all([await self.get_state(sensor) == self.states["motion_off"] for sensor in self.sensors["motion"]]):
+        if all([await self.get_state(sensor) == self.states["motion_off"] for sensor in self.sensors[SENSOR_TYPE_MOTION]]):
             # all motion sensors off, starting timer
             await self.refresh_timer()
         else:
@@ -406,7 +421,7 @@ class AutoMoLi(hass.Hass):  # type: ignore
         """Handle motion events."""
         self.lg(
             f"motion_event(..) received '{adu.hl(event)}' event from "
-            f"'{data['entity_id'].replace(KEYWORDS['motion'], '')}' | {self.dimming = }",
+            f"'{data['entity_id'].replace(KEYWORDS[SENSOR_TYPE_MOTION], '')}' | {self.dimming = }",
             level=logging.DEBUG,
         )
 
@@ -421,7 +436,7 @@ class AutoMoLi(hass.Hass):  # type: ignore
             await self.lights_on()
         else:
             self.lg(
-                f"motion_event(..) light in {self.room.capitalize()} already on → refreshing the timer | {self.dimming = }",
+                f"motion_event(..) light in {self.room.title()} already on → refreshing the timer | {self.dimming = }",
                 level=logging.DEBUG,
             )
 
@@ -473,13 +488,13 @@ class AutoMoLi(hass.Hass):  # type: ignore
     async def is_blocked(self) -> bool:
 
         # the "shower case"
-        self.lg(f"{self.thresholds.get('humidity') = }", level=logging.DEBUG)
+        self.lg(f"{self.thresholds.get(SENSOR_TYPE_HUMIDITY) = }", level=logging.DEBUG)
 
-        if humidity_threshold := self.thresholds.get("humidity"):
+        if humidity_threshold := self.thresholds.get(SENSOR_TYPE_HUMIDITY):
 
-            self.lg(f"{self.sensors['humidity'] = }", level=logging.DEBUG)
+            self.lg(f"{self.sensors[SENSOR_TYPE_HUMIDITY] = }", level=logging.DEBUG)
 
-            for sensor in self.sensors["humidity"]:
+            for sensor in self.sensors[SENSOR_TYPE_HUMIDITY]:
                 try:
                     current_humidity = float(await self.get_state(sensor))
                 except ValueError as error:
@@ -495,12 +510,31 @@ class AutoMoLi(hass.Hass):  # type: ignore
                     # blocker.append(sensor)
                     await self.refresh_timer()
                     self.lg(
-                        f"🛁 no motion in {hl(self.room.capitalize())} since "
+                        f"🛁 no motion in {hl(self.room.title())} since "
                         f"{hl(natural_time(int(self.active['delay'])))} → "
                         f"but {hl(current_humidity)}%RH > "
                         f"{hl(humidity_threshold)}%RH"
                     )
                     return True
+
+        for sensor in self.sensors.get(SENSOR_TYPE_DOOR, []):
+            try:
+                state = await self.get_state(sensor)
+                should_block = state in self.door_blocking_states
+            except ValueError as error:
+                self.lg(f"self.get_state(door_sensor) raised a ValueError: {error}", level=logging.ERROR)
+                continue
+
+            self.lg(f"{sensor}.state = {state}", level=logging.DEBUG)
+
+            if should_block:
+                await self.refresh_timer()
+                self.lg(
+                    f"🚪 no motion in {hl(self.room.title())} since "
+                    f"{hl(natural_time(int(self.active['delay'])))} → "
+                    f"but the door state is blocking turning off the light"
+                )
+                return True
 
         return False
 
@@ -527,13 +561,13 @@ class AutoMoLi(hass.Hass):  # type: ignore
             if dim_method == DimMethod.STEP:
                 dim_attributes = {"brightness_step_pct": int(self.dim["brightness_step_pct"])}
                 message = (
-                    f"{hl(self.room.capitalize())} → dim to {hl(self.dim['brightness_step_pct'])} | "
+                    f"{hl(self.room.title())} → dim to {hl(self.dim['brightness_step_pct'])} | "
                     f"{hl('off')} in {natural_time(seconds_before)}"
                 )
 
             elif dim_method == DimMethod.TRANSITION:
                 dim_attributes = {"transition": int(seconds_before)}
-                message = f"{hl(self.room.capitalize())} → transition to {hl('off')} ({natural_time(seconds_before)})"
+                message = f"{hl(self.room.title())} → transition to {hl('off')} ({natural_time(seconds_before)})"
 
             self.dimming = True
 
@@ -552,18 +586,18 @@ class AutoMoLi(hass.Hass):  # type: ignore
         """Turn on the lights."""
 
         self.lg(
-            f"lights_on(..) {self.thresholds.get('illuminance') = } | {self.dimming = } | {force = } | {bool(force or self.dimming) = }",
+            f"lights_on(..) {self.thresholds.get(SENSOR_TYPE_ILLUMINANCE) = } | {self.dimming = } | {force = } | {bool(force or self.dimming) = }",
             level=logging.DEBUG,
         )
 
         force = bool(force or self.dimming)
 
-        if illuminance_threshold := self.thresholds.get("illuminance"):
+        if illuminance_threshold := self.thresholds.get(SENSOR_TYPE_ILLUMINANCE):
 
             # the "eco mode" check
-            for sensor in self.sensors["illuminance"]:
+            for sensor in self.sensors[SENSOR_TYPE_ILLUMINANCE]:
                 self.lg(
-                    f"lights_on(..) {self.thresholds.get('illuminance') = } | {float(await self.get_state(sensor)) = }",
+                    f"lights_on(..) {self.thresholds.get(SENSOR_TYPE_ILLUMINANCE) = } | {float(await self.get_state(sensor)) = }",
                     level=logging.DEBUG,
                 )
                 try:
@@ -602,7 +636,7 @@ class AutoMoLi(hass.Hass):  # type: ignore
                     self._switched_on_by_automoli.add(item)
 
             self.lg(
-                f"{hl(self.room.capitalize())} turned {hl(f'on')} → "
+                f"{hl(self.room.title())} turned {hl(f'on')} → "
                 f"{'hue' if self.active['is_hue_group'] else 'ha'} scene: "
                 f"{hl(light_setting.replace('scene.', ''))}"
                 f" | delay: {hl(natural_time(int(self.active['delay'])))}",
@@ -624,14 +658,19 @@ class AutoMoLi(hass.Hass):  # type: ignore
                     if entity.startswith("switch."):
                         await self.call_service("homeassistant/turn_on", entity_id=entity)
                     else:
-                        await self.call_service(
-                            "homeassistant/turn_on", entity_id=entity, brightness_pct=self.active["light_setting"]
-                        )
+                        if self.active["light_setting"] == DEFAULT_LIGHT_SETTING:
+                            await self.call_service("homeassistant/turn_on", entity_id=entity)
+                            _brightness_info = ""
+                        else:
+                            await self.call_service(
+                                "homeassistant/turn_on", entity_id=entity, brightness_pct=self.active["light_setting"]
+                            )
+                            _brightness_info = f"brightness: {hl(self.active['light_setting'])}% | "
 
                         self.lg(
-                            f"{hl(self.room.capitalize())} turned {hl(f'on')} → "
-                            f"brightness: {hl(self.active['light_setting'])}%"
-                            f" | delay: {hl(natural_time(int(self.active['delay'])))}",
+                            f"{hl(self.room.title())} turned {hl(f'on')} → "
+                            f"{_brightness_info}"
+                            f"delay: {hl(natural_time(int(self.active['delay'])))}",
                             icon=ON_ICON,
                         )
                     if self.only_own_events:
@@ -665,7 +704,7 @@ class AutoMoLi(hass.Hass):  # type: ignore
                     at_least_one_turned_off = True
             if at_least_one_turned_off:
                 self.lg(
-                    f"no motion in {hl(self.room.capitalize())} since "
+                    f"no motion in {hl(self.room.title())} since "
                     f"{hl(natural_time(int(self.active['delay'])))} → turned {hl(f'off')}",
                     icon=OFF_ICON,
                 )
@@ -673,7 +712,7 @@ class AutoMoLi(hass.Hass):  # type: ignore
             # experimental | reset for xiaomi "super motion" sensors | idea from @wernerhp
             # app: https://github.com/wernerhp/appdaemon_aqara_motion_sensors
             # mod: https://community.smartthings.com/t/making-xiaomi-motion-sensor-a-super-motion-sensor/139806
-            for sensor in self.sensors["motion"]:
+            for sensor in self.sensors[SENSOR_TYPE_MOTION]:
                 await self.set_state(
                     sensor,
                     state="off",
@@ -682,6 +721,8 @@ class AutoMoLi(hass.Hass):  # type: ignore
 
     async def find_sensors(self, keyword: str, room_name: str, states: Dict[str, Dict[str, Any]]) -> List[str]:
         """Find sensors by looking for a keyword in the friendly_name."""
+        if self.disable_sensor_auto_lookup:
+            return []
 
         def lower_umlauts(text: str, single: bool = True) -> str:
             return (
@@ -771,7 +812,7 @@ class AutoMoLi(hass.Hass):  # type: ignore
 
         room = ""
         if "room" in self.config:
-            room = f" · {hl(self.config['room'].capitalize())}"
+            room = f" · {hl(self.config['room'].title())}"
 
         self.lg("")
         self.lg(f"{hl(APP_NAME)} v{hl(__version__)}{room}", icon=self.icon)
